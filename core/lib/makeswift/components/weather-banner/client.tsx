@@ -1,11 +1,13 @@
-import 'server-only';
+'use client';
 
+import { clsx } from 'clsx';
 import { CloudSun, Wind } from 'lucide-react';
-import { cache } from 'react';
+import { useMemo } from 'react';
+import useSWR from 'swr';
 import { z } from 'zod';
 
 const OPEN_METEO_FORECAST_URL = 'https://api.open-meteo.com/v1/forecast';
-const OPEN_METEO_REVALIDATE_SECONDS = 15 * 60;
+const OPEN_METEO_REFRESH_INTERVAL = 15 * 60 * 1000;
 
 const DEFAULT_LOCATION = {
   name: 'Tokyo',
@@ -44,9 +46,12 @@ const openMeteoForecastSchema = z.object({
 type OpenMeteoForecastResponse = z.infer<typeof openMeteoForecastSchema>;
 
 interface Props {
+  className?: string;
   latitude?: number;
   longitude?: number;
   locationName?: string;
+  showUpdatedTime?: boolean;
+  showWind?: boolean;
 }
 
 const weatherDescriptions: Record<number, string> = {
@@ -84,17 +89,8 @@ const numberFormatter = new Intl.NumberFormat('en', {
   maximumFractionDigits: 1,
 });
 
-const getCurrentWeather = cache(async (latitude: number, longitude: number) => {
-  const params = new URLSearchParams({
-    latitude: latitude.toString(),
-    longitude: longitude.toString(),
-    current_weather: 'true',
-    timezone: 'auto',
-  });
-
-  const response = await fetch(`${OPEN_METEO_FORECAST_URL}?${params.toString()}`, {
-    next: { revalidate: OPEN_METEO_REVALIDATE_SECONDS },
-  });
+async function fetchCurrentWeather(url: string): Promise<OpenMeteoForecastResponse> {
+  const response = await fetch(url);
 
   if (!response.ok) {
     throw new Error(`Open-Meteo request failed with status ${response.status}`);
@@ -104,11 +100,11 @@ const getCurrentWeather = cache(async (latitude: number, longitude: number) => {
   const parsedForecast = openMeteoForecastSchema.safeParse(payload);
 
   if (!parsedForecast.success) {
-    return {};
+    throw new Error('Open-Meteo returned an unexpected response');
   }
 
   return parsedForecast.data;
-});
+}
 
 function formatMeasurement(value: number, unit = '') {
   const formattedValue = numberFormatter.format(value);
@@ -134,20 +130,47 @@ function getWeatherDescription(code: number) {
   return weatherDescriptions[code] ?? `Weather code ${code}`;
 }
 
-function WeatherUnavailableBanner({ locationName }: { locationName: string }) {
+function getWeatherUrl(latitude: number, longitude: number) {
+  const params = new URLSearchParams({
+    latitude: latitude.toString(),
+    longitude: longitude.toString(),
+    current_weather: 'true',
+    timezone: 'auto',
+  });
+
+  return `${OPEN_METEO_FORECAST_URL}?${params.toString()}`;
+}
+
+function normalizeCoordinate(value: number | undefined, fallback: number) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function WeatherUnavailableBanner({
+  className,
+  locationName,
+  isLoading,
+}: {
+  className?: string;
+  locationName: string;
+  isLoading?: boolean;
+}) {
   return (
     <section
       aria-label={`${locationName} weather`}
-      className="border-b border-contrast-100 bg-background"
+      className={clsx(className, 'border-b border-contrast-100 bg-background')}
     >
       <div className="mx-auto flex max-w-screen-2xl items-center gap-3 px-4 py-3 text-sm text-foreground md:px-6">
         <span className="grid size-10 shrink-0 place-items-center rounded-full bg-contrast-100 text-contrast-500">
           <CloudSun aria-hidden="true" size={20} strokeWidth={1.75} />
         </span>
         <div>
-          <p className="font-semibold">Weather data unavailable</p>
+          <p className="font-semibold">
+            {isLoading ? `${locationName} weather` : 'Weather data unavailable'}
+          </p>
           <p className="text-xs text-contrast-500">
-            Open-Meteo current conditions for {locationName} could not be loaded.
+            {isLoading
+              ? 'Loading current conditions.'
+              : `Open-Meteo current conditions for ${locationName} could not be loaded.`}
           </p>
         </div>
       </div>
@@ -155,21 +178,37 @@ function WeatherUnavailableBanner({ locationName }: { locationName: string }) {
   );
 }
 
-export async function OpenMeteoBanner({
-  latitude = DEFAULT_LOCATION.latitude,
-  longitude = DEFAULT_LOCATION.longitude,
+export function MSWeatherBanner({
+  className,
+  latitude,
+  longitude,
   locationName = DEFAULT_LOCATION.name,
+  showUpdatedTime = true,
+  showWind = true,
 }: Props) {
-  let forecast: OpenMeteoForecastResponse;
+  const normalizedLatitude = normalizeCoordinate(latitude, DEFAULT_LOCATION.latitude);
+  const normalizedLongitude = normalizeCoordinate(longitude, DEFAULT_LOCATION.longitude);
+  const weatherUrl = useMemo(
+    () => getWeatherUrl(normalizedLatitude, normalizedLongitude),
+    [normalizedLatitude, normalizedLongitude],
+  );
 
-  try {
-    forecast = await getCurrentWeather(latitude, longitude);
-  } catch {
-    return <WeatherUnavailableBanner locationName={locationName} />;
+  const {
+    data: forecast,
+    error,
+    isLoading,
+  } = useSWR<OpenMeteoForecastResponse, Error>(weatherUrl, fetchCurrentWeather, {
+    dedupingInterval: OPEN_METEO_REFRESH_INTERVAL,
+    refreshInterval: OPEN_METEO_REFRESH_INTERVAL,
+    revalidateOnFocus: false,
+  });
+
+  if (isLoading) {
+    return <WeatherUnavailableBanner className={className} isLoading locationName={locationName} />;
   }
 
-  if (!forecast.current_weather) {
-    return <WeatherUnavailableBanner locationName={locationName} />;
+  if (error || !forecast?.current_weather) {
+    return <WeatherUnavailableBanner className={className} locationName={locationName} />;
   }
 
   const { current_weather: currentWeather, current_weather_units: units } = forecast;
@@ -180,7 +219,7 @@ export async function OpenMeteoBanner({
   return (
     <section
       aria-label={`${locationName} current weather`}
-      className="border-b border-contrast-100 bg-accent-highlight"
+      className={clsx(className, 'border-b border-contrast-100 bg-accent-highlight')}
     >
       <div className="mx-auto flex max-w-screen-2xl flex-col gap-3 px-4 py-3 text-sm text-foreground md:flex-row md:items-center md:justify-between md:px-6">
         <div className="flex min-w-0 items-center gap-3">
@@ -192,7 +231,7 @@ export async function OpenMeteoBanner({
             <p className="font-semibold">{locationName} weather</p>
             <p className="truncate text-xs text-contrast-500">
               {description}
-              {observedAt ? ` / Updated ${observedAt}` : null}
+              {showUpdatedTime && observedAt ? ` / Updated ${observedAt}` : null}
             </p>
           </div>
         </div>
@@ -205,13 +244,15 @@ export async function OpenMeteoBanner({
             </dd>
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <Wind aria-hidden="true" size={16} strokeWidth={1.75} />
-            <dt className="text-contrast-500">Wind</dt>
-            <dd className="font-semibold">
-              {formatMeasurement(currentWeather.windspeed, units?.windspeed)} {windDirection}
-            </dd>
-          </div>
+          {showWind ? (
+            <div className="flex items-center gap-1.5">
+              <Wind aria-hidden="true" size={16} strokeWidth={1.75} />
+              <dt className="text-contrast-500">Wind</dt>
+              <dd className="font-semibold">
+                {formatMeasurement(currentWeather.windspeed, units?.windspeed)} {windDirection}
+              </dd>
+            </div>
+          ) : null}
         </dl>
       </div>
     </section>

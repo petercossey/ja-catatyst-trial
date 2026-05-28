@@ -1,6 +1,5 @@
 import { Metadata } from 'next';
 
-import { OpenMeteoBanner } from '~/components/demo/open-meteo-banner';
 import { locales } from '~/i18n/locales';
 import { getMakeswiftPageMetadata, Page as MakeswiftPage } from '~/lib/makeswift';
 import { getMetadataAlternates } from '~/lib/seo/canonical';
@@ -31,10 +30,5 @@ export function generateStaticParams(): Params[] {
 export default async function Home({ params }: Props) {
   const { locale } = await params;
 
-  return (
-    <>
-      <OpenMeteoBanner />
-      <MakeswiftPage locale={locale} path="/" />
-    </>
-  );
+  return <MakeswiftPage locale={locale} path="/" />;
 }
